@@ -1,0 +1,172 @@
+In PG, everything relies on labels configured at the container level. Traefik relies on those labels to decide where the traffic needs to go.
+In PG, the configuration is located in a single file /opt/appdata/traefik/traefik.toml
+
+This is the original (PG) Traefik configuration file:
+
+Code:
+
+insecureskipverify = true
+
+logLevel = "WARN"
+
+defaultEntryPoints = ["http", "https"]
+
+[entryPoints]
+  [entryPoints.http]
+  address = ":80"
+  #[entryPoints.http.redirect]
+  #  entryPoint = "https"
+  [entryPoints.https]
+  address = ":443"
+    [entryPoints.https.tls]
+    MinVersion = "VersionTLS12"
+    CipherSuites = ["TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256","TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256"]
+  [entryPoints.monitor]
+  address = ":8081"
+
+[retry]
+
+[acme]
+acmeLogging = true
+email = "alan.parsons@project.com"
+storage = "/etc/traefik/acme/acme.json"
+entryPoint = "https"
+  [acme.dnsChallenge]
+    provider = "cloudflare"
+    delayBeforeCheck = 30
+
+[[acme.domains]]
+  main = "*.project.com"
+  sans = ["project.com"]
+
+[docker]
+endpoint = "unix:///var/run/docker.sock"
+domain = "project.com"
+watch = true
+exposedbydefault = false
+network = "plexguide"
+
+As we can see, currently Traefik is configured to handle all requests for a single domain name: project.com.
+Let's tell to Traefik to handle an additional domain:
+
+
+[[acme.domains]]
+main = "*.project.com"
+sans = ["project.com"]
+
+
+Becomes
+
+
+[[acme.domains]]
+main = "*.project.com"
+sans = ["project.com"]
+[[acme.domains]]
+main = "*.harvest.com"
+sans = ["harvest.com"]
+
+
+Restarting traefik container will force it to request the additional keys for the new domain. You can check if everything went ok by opening the file /opt/appdata/traefik/acme/acme.json. You should see the keys for the 2 domains now.
+
+In order to handle multiple domains, we need to use another technique (Front-end/Back-end). But before proceeding, we should separate the fix part of the configuration from the more dynamic one and though create an additional file where we will put the configuration of the different front-end and back-end.
+In order to ease the management of the different Front-Ends and Back-Ends aside of the docker container configuration, it is advisable put everything in a separate file that Traefik will monitor for changes the same way it does for docker containers.
+
+Let's create a additional file file servers.toml,
+mkdir -p /opt/appdata/traefik/servers.toml
+
+Let's insert in the main file a reference to the new servers.toml file. This to be sure, when a request arrives, Traefik will check both the container labels but also the servers.toml file.
+
+[file]
+watch = true
+filename = "/opt/appdata/traefik/servers.toml"
+
+
+The final main configuration file should look like this:
+
+Code:
+
+insecureskipverify = true
+
+logLevel = "WARN"
+
+defaultEntryPoints = ["http", "https"]
+
+[entryPoints]
+  [entryPoints.http]
+  address = ":80"
+  #[entryPoints.http.redirect]
+  #  entryPoint = "https"
+  [entryPoints.https]
+  address = ":443"
+    [entryPoints.https.tls]
+    MinVersion = "VersionTLS12"
+    CipherSuites = ["TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256","TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256"]
+  [entryPoints.monitor]
+  address = ":8081"
+
+[retry]
+
+[acme]
+acmeLogging = true
+email = "alan.parsons@project.com"
+storage = "/etc/traefik/acme/acme.json"
+entryPoint = "https"
+  [acme.dnsChallenge]
+    provider = "cloudflare"
+    delayBeforeCheck = 30
+[[acme.domains]]
+  main = "*.project.com"
+  sans = ["project.com"]
+[[acme.domains]]
+  main = "*.harvest.com"
+  sans = ["harvest.com"]
+
+[file]
+  watch = true
+  filename = "/opt/appdata/traefik/servers.toml"
+
+[docker]
+endpoint = "unix:///var/run/docker.sock"
+domain = "project.com"
+watch = true
+exposedbydefault = false
+network = "plexguide"
+
+Now, we need to add the new Front-Ends and Back-Ends in the servers.toml file.
+nano /opt/appdata/traefik/servers.toml
+
+Let's paste the following code
+
+Code:
+
+loglevel = "ERROR"
+
+[frontends]
+    [frontends.xxx]
+        backend = "xxx"
+        [frontends.xxx.routes.domain]
+            rule = "Host:xxx.project.com"
+    [frontends.yyy]
+        backend = "yyy"
+        [frontends.yyy.routes.domain]
+            rule = "Host:yyy.harvest.com"
+    [frontends.yyy]
+        backend = "zzz"
+        [frontends.zzz.routes.domain]
+            rule = "Host:zzz.harvest.com"
+
+[backends]
+    [backends.xxx]
+        [backends.xxx.servers.xxx]
+            url = "http://192.168.1.1:8100"
+    [backends.yyy]
+        [backends.yyy.servers.yyy]
+            url = "http://192.168.1.9:4430"
+        [backends.zzz.servers.zzz]
+            url = "http://192.168.1.9:8000"
+
+We see we have 2 Front-Ends, one with one URL and the other with 2 and we have 3 backend servers
+For each Front-End "Server" we need a Back-End "Application/Service"
+When a request comes in for zzz.harvest.com (Front-End server) the request is forwarded to backend "zzz" which URL is "http://192.168.1.9:8000"
+
+That's all Folks !
